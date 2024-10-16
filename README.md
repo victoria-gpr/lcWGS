@@ -4,6 +4,16 @@
 
 # UPSTREAM ANALYSIS
 
+```bash
+RAW=/home/ralvarezv/raw-genomes  #Directory where raw data is located 
+TRIM=/home/ralvarezv/new_workflow/trimmed_reads  #Directory where trimmed reads are located
+MITOREF=/home/ralvarezv/reference  #Directory where the reference mitogenome is located 
+SPLIT=/home/ralvarezv/new_workflow/bbsplit  #Directory where splitted reads are located
+REF=/home/ralvarezv/new_workflow/reference #Directory where the reference genome is located
+BAM=/home/ralvarezv/new_workflow/bam_files #Directory where .bam files (aligned) are located
+METALIGN=/home/ralvarezv/new_workflow/metrics/bwa_align #Directory where metrics about alignment (using samtools-flagstat) are located
+SORTBAM=/home/ralvarezv/new_workflow/sorted_bam		#Directory where sorted bam files are located.
+```
 # Step 1a: Quality Control of Raw reads - fastQC
 
 FastQC performs a series of analyses, each represented by a module, to evaluate different aspects of data quality.
@@ -50,13 +60,14 @@ We used Trimmomatic to trim quality, remove adapter sequences, and filter out lo
 
 Script:
 ``` bash
-#------Set relative path--------------------
-TRIM=/home/ralvarezv/trimmomatic_02/ #Directory where we will put the trimmed reads
-ADAPT=/home/ralvarezv/adapters #Directory where the adapters are located
-#------Command------------------------------
-cat list.txt | while read a
+# Loop through the list of samples to perform trimming
+cat list.txt | while read sample
 do
-  trimmomatic PE -threads 5 -phred33 $RAW/${a}_1.fq.gz $RAW/${a}_2.fq.gz -baseout $TRIM/${a}_trimmed.fq ILLUMINACLIP:$ADAPT/TruSeq2OV$ LEADING:3 TRAILING:3 MINLEN:36
+ java -jar $EBROOTTRIMMOMATIC/trimmomatic-0.39.jar PE -threads 8 -phred33 \
+  $RAW/${sample}_R1.fq.gz $RAW/${sample}_R2.fq.gz \
+  $TRIM/${sample}_R1_paired.fq $TRIM/${sample}_R1_unpaired.fq \
+  $TRIM/${sample}_R2_paired.fq $TRIM/${sample}_R2_unpaired.fq \
+  ILLUMINACLIP:NexteraPE-PE.fa:2:30:10 LEADING:5 TRAILING:5 SLIDINGWINDOW:4:15 MINLEN:75
 done
 ```
 Details:
@@ -75,14 +86,12 @@ This tool is designed to separate sequencing reads into different bins based on 
 
 Script:
 ``` bash
-#------Set relative path--------------------
-TRIM=/home/ralvarezv/trimmomatic_01 #Directory of the trimmed reads
-MITOREF=/home/ralvarezv/bbsplit_03 #Directory of the reference mitogenome
-SPLIT=/home/ralvarezv/bbsplit_03 #Output directory for split reads
-#------Command------------------------------
-cat list.txt | while read a
+# BBSplit command to separate mitochondrial reads from nuclear reads
+cat list.txt | while read sample
 do
-  bbsplit.sh ref=$MITOREF/mitogenome.fasta in1=$TRIM/${a}_trimmed_1P.fq in2=$TRIM/${a}_trimmed_2P.fq basename=${a}_mt.fq out1=$SPLIT/${a}_nomt_R1.fq out2=$SPLIT/${a}_nomt_R2.fq
+  bbsplit.sh ref=$MITOREF/mitogenome_NC_000886.fasta \
+  in1=$TRIM/${sample}_R1_paired.fq in2=$TRIM/${sample}_R2_paired.fq \
+  basename=${sample}mt%.fq out1=$SPLIT/${sample}_nomt_R1.fq out2=$SPLIT/${sample}_nomt_R2.fq
 done
 ```
 Details:
@@ -102,90 +111,71 @@ BWA is a software package for mapping low-divergent sequences against a large re
 Before aligning the reads to the reference genome, it is necessary to index the reference genome. 
 The reference genome was used: GCF_015237465.2
 
-Example command:
-`bwa index reference.fasta`
+#### BWA Indexing of Reference Genome
 
 Script:
-```
-#------Set relative path--------------------
-REF=/home/ralvarezv/reference #Reference genome directory
-#------Command------------------------------
-bwa index -p $REF/cmydas_index $REF/GCF_015237465.2_rCheMyd1.pri.v2_genomic.fna
+``` bash
+# BWA index the reference genome
+bwa index -p $REF/reference_genome.fasta
 ```
 Details:
 - p: Output database prefix
 - The results should be in the “reference” folder and must be 5 files:
-    - cmydas_index.amb
-    - cmydas_index.ann
-    - cmydas_index.bwt
-    - cmydas_index.pac
-    - cmydas_index.sa
-  
-These files should be moved to a new folder called "bwa_04".
+    - *.amb
+    - *.ann
+    - *.bwt
+    - *.pac
+    - *.sa
+
+#### Samtools Indexing of Reference Genome
+The samtools faidx command is used to create an index for a FASTA-formatted reference genome. 
+This index allows for efficient retrieval of sequences from specific genomic regions, providing quick access to the underlying nucleotide information. 
+The index file created by samtools faidx has the extension ".fai."
+
+``` bash
+# Index the reference genome using Samtools
+samtools faidx $REF/reference_genome.fasta
+```
+
+#### Create Sequence Dictionary for Reference Genome
+The CreateSequenceDictionary step generates a sequence dictionary for the reference genome. This dictionary provides information about the reference sequence, including the name, length, and order of each chromosome or contig.
+
+```bash
+# GATK CreateSequenceDictionary command
+gatk CreateSequenceDictionary -R $REF/reference_genome.fasta --MAX_RECORDS_IN_RAM 17000
+```
 
 ### Genome aligment
 To align our reads against the reference genome we used bwa mem.
-It is the primary and most commonly used algorithm in BWA for aligning high-quality sequencing reads, particularly from next-generation sequencing (NGS) platforms like Illumina.
-
-Here is a basic example of how to use bwa mem: `bwa mem reference.fasta reads.fq > aligned_reads.sam` 
+It is the primary and most commonly used algorithm in BWA for aligning high-quality sequencing reads, particularly from next-generation sequencing (NGS) platforms like Illumina. Samtools provides a set of utilities that allow users to manipulate and analyze data in SAM (Sequence Alignment/Map) and BAM (Binary Alignment/Map) formats.
 
 Script:
 ```
-#------Set relative path--------------------
-REF=/home/ralvarezv/bwa_04
-OUT=/home/ralvarezv/genome_aligned
-SPLIT=/home/ralvarezv/bbsplit_03
-#------Command------------------------------
-cat list.txt | while read a
+# BWA read alignment
+cat list.txt | while read sample
 do
-  bwa mem -t 22 -M -R @RG\tID:${a}\tLB:CKDL230023566\tPL:ILLUMINA\tPU:A00742\tSM:${a} \
-  $REF/cmydas_index $split/${a}_nomt_R1.fq $SPLIT/${a}_nomt_R2.fq > $OUT/${a}.algn.sam
+  bwa mem -t 16 $REF/reference_genome \
+  $SPLIT/${sample}_nomt_R1.fq $SPLIT/${sample}_nomt_R2.fq \
+  | samtools view -bS -@ 16 - > $BAM/${sample}.bam
 done
 ```
 Details:
-- -t 22: we used 22 threads to run this process
-- -M: Mark shorter splits as secondary (for Picard compatibility)
-- -R: Complete with sample names, library IDs, platform IDs and sample IDs. They all came from the same bookstore, platform, etc. The only thing that varied was the name of the sample
-
-# Step 5: Samtools
-Samtools provides a set of utilities that allow users to manipulate and analyze data in SAM (Sequence Alignment/Map) and BAM (Binary Alignment/Map) formats.
-
-### 5.1: Convert .sam to .bam
-The samtools view command converts between SAM and BAM formats. 
-SAM is a human-readable text format, while BAM is a binary version that is more compact and faster to process.
-
-Script:
-```
-#------Set relative path--------------------
-SAM=/home/ralvarezv/genome_aligned  #Directory of the .sam files
-#------Command------------------------------
-cat list.txt | while read a
-do
-  samtools view -q 10 -f 0x2 -bSh -@ 5 $SAM/${a}.algn.sam > $BAM/${a}.algn.bam
-done
-```
-Details:
-- -q 10: skip alignments with MAPQ less than 10
-- -f 0x2: FLAG, only generates alignments with all the bits configured in FLAG and checks the list of FLAGS.
-          0x2: Proper pair, each segment aligns properly with its pair.
+- This script aligns paired-end reads to the reference genome using BWA-MEM, and outputs the results in BAM format using Samtools.
 - -b: output is delivered in .sam format
 - -S: Automatically detect input
-- -h: include the header in the output
 
-### 5.2: Watch statistics
+# Step 5: Watch statistics and Sort by genome coordinates
+### Samtools Flagstat - Alignment Statistics
 The samtools flagstat command is used to generate simple statistics from a BAM file. 
 These statistics provide information about the number and types of reads in the alignment file based on their alignment flags. 
 The output includes details about how many reads are properly paired, how many are singletons, and various other categories.
 
 Script:
 ```
-#------Set relative path--------------------
-SAM=/home/ralvarezv/genome_aligned   #Directory of the input data
-METDIR=/home/ralvarezv/genome_aligned/metrics   #Directory of the output data 
-#------Command------------------------------
-cat list.txt | while read a
+# Generate alignment statistics using Samtools flagstat
+cat list.txt | while read sample
 do
-   samtools flagstat $BAM/${a}_}.algn.bam > $METDIR/${a}_stats.txt
+  samtools flagstat $BAM/${sample}.bam > $METALIGN/${sample}_stats.txt
 done
 ```
 Details: This is an example of what we can see in the stats.txt file of a sample:
@@ -205,34 +195,21 @@ Details: This is an example of what we can see in the stats.txt file of a sample
   0 + 0 with mate mapped to a different chr (mapQ>=5)
   ```
 
-### 5.3: Sort by genome coordinates
+### Sorting BAM Files
 The samtools sort command is used to sort a BAM file by genomic coordinates. 
 Sorting is a necessary step before many downstream analyses, as it allows for efficient and ordered access to the aligned reads.
 
 Script:
 ```
-#------Set relative path--------------------
-SORT=/home/ralvarezv/genome_aligned/sorted   #Directory of the bam sorted data
-BAM=/home/ralvarezv/genome_aligned/metrics   #Directory of the bam input data 
-#------Command------------------------------
+# Samtools sort command
 cat list.txt | while read a
 do
-  samtools sort -o $SORTBAM/${a}.algn.sort.bam -@ 5 $BAM/${a}.algn.bam
+  samtools sort -o $SORTBAM/${a}_sorted.bam -@ 5 $BAM/${a}.bam
 done
 ```
 Details:
 - -o: leave the results in the sorted folder with this name
 - -@ 5: the number of cpu to use
-
-### 5.4: Indexing reference genome
-The samtools faidx command is used to create an index for a FASTA-formatted reference genome. 
-This index allows for efficient retrieval of sequences from specific genomic regions, providing quick access to the underlying nucleotide information. 
-The index file created by samtools faidx has the extension ".fai."
-
-Command:
-```
-samtools faidx GCF_015237465.2_rCheMyd1.pri.v2_genomic.fna
-```
 
 # Step 6: Cleaning bam files
 
@@ -244,15 +221,15 @@ The metrics file (metrics.txt) provides information about the number and types o
 
 Script:
 ```
-#------Set relative path--------------------
-SORT=/home/ralvarezv/genome_aligned/sorted   #Directory of the bam sorted data
-DEDUP=/home/ralvarezv/genome_aligned/deduplicated   #Directory of the bam output data 
-#------Command------------------------------
+# Picard MarkDuplicates command
 cat list.txt | while read a
 do
-  java -jar picard.jar MarkDuplicates \
-  -I $SORT/${a}.algn.sort.bam -O $DEDUP/${a}.dedup.bam -METRICS_FILE $DEDUP/dedup.metrics.txt \
-  -VALIDATION_STRINGENCY LENIENT -CREATE_INDEX true -CREATE_MD5_FILE true -TAGGING_POLICY All -ASSUME_SORT_ORDER coordinate
+  java -jar $EBROOTPICARD/picard.jar MarkDuplicates \
+  -I $SORTBAM/${a}_sorted.bam \
+  -O dedup/${a}_sorted.dedup.bam \
+  -METRICS_FILE metrics/dedup/${a}_metrics.txt \
+  -VALIDATION_STRINGENCY SILENT -REMOVE_DUPLICATES true \
+  -ASSUME_SORT_ORDER coordinate -MAX_RECORDS_IN_RAM 78000
 done
 ```
 Details:
@@ -264,21 +241,88 @@ Details:
 - ASSUME_SORT_ORDER coordinate: Assumes that the input BAM file is sorted in coordinate order. It is important to correctly specify the sorting order to ensure accurate duplicate marking.
 
 ### Cleaning the BAM files
-The SamClean tool of Picard, cleans the provided SAM/BAM, soft-clipping beyond-end-of-reference alignments and setting MAPQ to 0 for unmapped reads.
+The CleanSam tool of Picard, cleans the provided SAM/BAM, soft-clipping beyond-end-of-reference alignments and setting MAPQ to 0 for unmapped reads.
 ```
 #------Set relative path--------------------
-OUT=/home/ralvarezv/genome_aligned/clean_bam   #Directory of the bam sorted data
-DEDUP=/home/ralvarezv/genome_aligned/deduplicated   #Directory of the bam output data 
-#------Command------------------------------
-cat list.txt | while read a
+cat list.txt | while read sample
 do
-  java -jar picard.jar CleanSam \
-  -I $DEDUP/${a}.dedup.bam \
-  -O $OUT/${a}cleaned.bam
+  java -jar $EBROOTPICARD/picard.jar CleanSam \
+    -I ${sample}_sorted.dedup.bam \
+    -O ${sample}_sorted.dedup_clean.bam
+done
+```
+### Add or Replace Read Groups with Picard
+Read groups are essential for tracking sequencing data, and this step ensures each BAM file has the correct metadata associated with it.
+```bash
+cat list_RG.txt | while read sample
+do
+  java -jar picard.jar AddOrReplaceReadGroups \
+    I=${sample}_sorted.dedup_clean.bam \
+    O=${sample}_sorted.dedup_clean_RG.bam \
+    RGID=1 RGLB=lib1 RGPL=ILLUMINA RGPU=unit1 RGSM=${sample} \
+    CREATE_INDEX=True
 done
 ```
 
-# Step 7 
+# Step 7: Indel Realignment with GATK and Samtools Indenxing
 
+The Indel Realignment step is important because it helps correct misalignments caused by insertions and deletions (indels) in sequencing data.
 
+### Create Indel Realignment Targets with GATK
+This step identifies regions where indels (insertions/deletions) might cause misalignment and creates a list of target regions for realignment.
+```bash
+cat list_RG.txt | while read sample
+do
+  gatk3 -T RealignerTargetCreator \
+    -R reference_genome.fasta \
+    -I ${sample}_sorted.dedup_clean_RG.bam \
+    -o ${sample}_realignment_targets.intervals \
+    -drf BadMate
+done
+```
+### Perform Indel Realignment with GATK
+Using the list of target regions, this step realigns the reads in the BAM file to correct misalignments caused by indels.
+```bash
+cat list_RG.txt | while read sample
+do
+  gatk3 -T IndelRealigner \
+    -I ${sample}_sorted.dedup_clean_RG.bam \
+    -R reference_genome.fasta \
+    -targetIntervals ${sample}_realignment_targets.intervals \
+    -o ${sample}_realigned.bam \
+    -consensusDeterminationModel USE_READS
+done
+```
+### Index the BAM Files with SAMtools
+This step creates an index (.bai) for the BAM files, which is necessary for efficient access and downstream processing.
+```bash
+cat list.txt | while read sample
+do
+  samtools index ${sample}_realigned.bam
+done
+```
+
+# Step 8: Calculate coverage with Mosdepth
+The calculation of coverage is crucial for the analyses that will be performed later in the downstream pipeline, especially in ANGSD. Coverage depth directly impacts the quality and accuracy of variant calling, population genetics statistics, and other genomic analyses. Ensuring proper coverage helps to minimize biases, avoid missing data, and improve the overall reliability of the results obtained from ANGSD and other downstream tools.
+
+### Calculate Coverage with Mosdepth (Pre-Deduplication)
+This step calculates the depth of coverage for each BAM file before removing duplicate reads, which helps assess the overall sequencing quality.
+```bash
+cat list.txt | while read sample
+do
+  singularity run mosdepth.sif mosdepth -n --fast-mode -t 2 -Q 20 \
+    ${sample}_prededup_coverage \
+    ${sample}_sorted.bam
+done
+```
+### Calculate Coverage with Mosdepth (Post-Deduplication)
+After indel realignment and other cleaning steps, this command calculates the coverage again to verify sequencing depth in the cleaned files.
+```bash
+cat list_RG.txt | while read sample
+do
+  singularity run mosdepth.sif mosdepth -n --fast-mode -t 2 -Q 20 \
+    ${sample}_postdedup_coverage \
+    ${sample}_realigned.bam
+done
+```
 
